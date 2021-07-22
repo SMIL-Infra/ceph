@@ -6,7 +6,7 @@ if(WITH_MGR_ROOK_CLIENT)
 endif()
 if(WITH_TESTS)
   include(AddCephTest)
-  add_tox_test(mgr ${CMAKE_CURRENT_SOURCE_DIR} TOX_ENVS py3 mypy flake8)
+  add_tox_test(mgr ${CMAKE_CURRENT_SOURCE_DIR} TOX_ENVS py3 mypy flake8 jinjalint)
 endif()
 
 # Location needs to match default setting for mgr_module_path, currently:
@@ -22,4 +22,12 @@ install(DIRECTORY
   REGEX "rook/rook-client-python.*" EXCLUDE
   REGEX "osd_perf_query/.*" EXCLUDE
   REGEX "tox.ini" EXCLUDE
-  REGEX "requirements.txt" EXCLUDE)
+  REGEX "requirements.*\.txt" EXCLUDE
+  REGEX "constraints.*\.txt" EXCLUDE
+  REGEX "node_modules" EXCLUDE
+  REGEX "cypress.*" EXCLUDE
+  REGEX "\.coveragerc" EXCLUDE
+  REGEX "\.editorconfig" EXCLUDE
+  REGEX "\..*lintrc" EXCLUDE
+  REGEX "\.browserslistrc" EXCLUDE
+  REGEX "\.prettier*" EXCLUDE)

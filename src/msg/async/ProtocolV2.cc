@@ -585,7 +585,7 @@ bool ProtocolV2::append_frame(F& frame) {
 
   ldout(cct, 25) << __func__ << " assembled frame " << bl.length()
                  << " bytes " << tx_frame_asm << dendl;
-  connection->outgoing_bl.append(bl);
+  connection->outgoing_bl.claim_append(bl);
   return true;
 }
 
@@ -1164,7 +1164,7 @@ CtPtr ProtocolV2::read_frame_segment() {
   try {
     rx_buffer = ceph::buffer::ptr_node::create(ceph::buffer::create_aligned(
         onwire_len, align));
-  } catch (std::bad_alloc&) {
+  } catch (const ceph::buffer::bad_alloc&) {
     // Catching because of potential issues with satisfying alignment.
     ldout(cct, 1) << __func__ << " can't allocate aligned rx_buffer"
                   << " len=" << onwire_len

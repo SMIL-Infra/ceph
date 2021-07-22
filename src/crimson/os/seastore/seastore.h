@@ -17,6 +17,7 @@
 #include "os/Transaction.h"
 #include "crimson/os/futurized_collection.h"
 #include "crimson/os/futurized_store.h"
+
 #include "crimson/os/seastore/transaction.h"
 #include "crimson/os/seastore/onode_manager.h"
 #include "crimson/os/seastore/omap_manager.h"
@@ -24,24 +25,27 @@
 
 namespace crimson::os::seastore {
 
-class SeastoreCollection;
 class Onode;
 using OnodeRef = boost::intrusive_ptr<Onode>;
 class TransactionManager;
 
-class SeaStore final : public FuturizedStore {
-  uuid_d osd_fsid;
+class SeastoreCollection final : public FuturizedCollection {
+public:
+  template <typename... T>
+  SeastoreCollection(T&&... args) :
+    FuturizedCollection(std::forward<T>(args)...) {}
 
+  seastar::shared_mutex ordering_lock;
+};
+
+class SeaStore final : public FuturizedStore {
 public:
 
   SeaStore(
+    SegmentManagerRef sm,
     TransactionManagerRef tm,
     CollectionManagerRef cm,
-    OnodeManagerRef om
-  ) : transaction_manager(std::move(tm)),
-      collection_manager(std::move(cm)),
-      onode_manager(std::move(om)) {}
-
+    OnodeManagerRef om);
   ~SeaStore();
     
   seastar::future<> stop() final;
@@ -62,7 +66,7 @@ public:
     const ghobject_t& oid,
     interval_set<uint64_t>& m,
     uint32_t op_flags = 0) final;
-  get_attr_errorator::future<ceph::bufferptr> get_attr(
+  get_attr_errorator::future<ceph::bufferlist> get_attr(
     CollectionRef c,
     const ghobject_t& oid,
     std::string_view name) const final;
@@ -124,6 +128,17 @@ public:
   unsigned get_max_attr_name_length() const final {
     return 256;
   }
+  enum class op_type_t : uint8_t {
+    TRANSACTION = 0,
+    READ,
+    WRITE,
+    GET_ATTR,
+    GET_ATTRS,
+    STAT,
+    OMAP_GET_VALUES,
+    OMAP_LIST,
+    MAX
+  };
 
 private:
   struct internal_context_t {
@@ -132,17 +147,21 @@ private:
 
     internal_context_t(
       CollectionRef ch,
-      ceph::os::Transaction &&_ext_transaction)
+      ceph::os::Transaction &&_ext_transaction,
+      TransactionRef &&transaction)
       : ch(ch), ext_transaction(std::move(_ext_transaction)),
+	transaction(std::move(transaction)),
 	iter(ext_transaction.begin()) {}
 
     TransactionRef transaction;
     std::vector<OnodeRef> onodes;
 
     ceph::os::Transaction::iterator iter;
+    std::chrono::steady_clock::time_point begin_timestamp = std::chrono::steady_clock::now();
 
-    void reset(TransactionRef &&t) {
-      transaction = std::move(t);
+    template <typename TM>
+    void reset_preserve_handle(TM &tm) {
+      tm->reset_transaction_preserve_handle(*transaction);
       onodes.clear();
       iter = ext_transaction.begin();
     }
@@ -154,20 +173,31 @@ private:
   auto repeat_with_internal_context(
     CollectionRef ch,
     ceph::os::Transaction &&t,
+    Transaction::src_t src,
+    op_type_t op_type,
     F &&f) {
     return seastar::do_with(
-      internal_context_t{ ch, std::move(t) },
+      internal_context_t(
+	ch, std::move(t),
+	transaction_manager->create_transaction(src)),
       std::forward<F>(f),
-      [](auto &ctx, auto &f) {
-	return repeat_eagain([&]() {
-	  ctx.reset(make_transaction());
-	  return std::invoke(f, ctx);
-	}).handle_error(
-	  crimson::ct_error::eagain::pass_further{},
-	  crimson::ct_error::all_same_way([&ctx](auto e) {
-	    on_error(ctx.ext_transaction);
-	  })
-	);
+      [this, op_type](auto &ctx, auto &f) {
+	return ctx.transaction->get_handle().take_collection_lock(
+	  static_cast<SeastoreCollection&>(*(ctx.ch)).ordering_lock
+	).then([&, this] {
+	  return repeat_eagain([&, this] {
+	    ctx.reset_preserve_handle(transaction_manager);
+	    return std::invoke(f, ctx);
+	  }).handle_error(
+	    crimson::ct_error::eagain::pass_further{},
+	    crimson::ct_error::all_same_way([&ctx](auto e) {
+	      on_error(ctx.ext_transaction);
+	    })
+	  );
+	}).then([this, op_type, &ctx] {
+	  add_latency_sample(op_type,
+	      std::chrono::steady_clock::now() - ctx.begin_timestamp);
+	});
       });
   }
 
@@ -175,7 +205,10 @@ private:
   auto repeat_with_onode(
     CollectionRef ch,
     const ghobject_t &oid,
-    F &&f) {
+    Transaction::src_t src,
+    op_type_t op_type,
+    F &&f) const {
+    auto begin_time = std::chrono::steady_clock::now();
     return seastar::do_with(
       oid,
       Ret{},
@@ -183,22 +216,48 @@ private:
       OnodeRef(),
       std::forward<F>(f),
       [=](auto &oid, auto &ret, auto &t, auto &onode, auto &f) {
-	return repeat_eagain([&, this] {
-	  t = make_transaction();
+	return repeat_eagain([&, this, src] {
+	  t = transaction_manager->create_transaction(src);
 	  return onode_manager->get_onode(
 	    *t, oid
-	  ).safe_then([&, this](auto onode_ret) {
+	  ).safe_then([&](auto onode_ret) {
 	    onode = std::move(onode_ret);
 	    return f(*t, *onode);
 	  }).safe_then([&ret](auto _ret) {
 	    ret = _ret;
 	  });
-	}).safe_then([&ret] {
+	}).safe_then([&ret, op_type, &t, begin_time, this] {
+	  const_cast<SeaStore*>(this)->add_latency_sample(op_type,
+                     std::chrono::steady_clock::now() - begin_time);
 	  return seastar::make_ready_future<Ret>(ret);
 	});
       });
   }
 
+  using _omap_get_value_ertr = with_trans_ertr<OMapManager::base_iertr>::extend<
+    crimson::ct_error::enodata
+    >;
+  using _omap_get_value_ret = _omap_get_value_ertr::future<ceph::bufferlist>;
+  _omap_get_value_ret _omap_get_value(
+    Transaction &t,
+    omap_root_t &&root,
+    std::string_view key) const;
+
+  using _omap_get_values_ertr = with_trans_ertr<OMapManager::base_iertr>;
+  using _omap_get_values_ret = _omap_get_values_ertr::future<omap_values_t>;
+  _omap_get_values_ret _omap_get_values(
+    Transaction &t,
+    omap_root_t &&root,
+    const omap_keys_t &keys) const;
+
+  using _omap_list_bare_ret = OMapManager::omap_list_bare_ret;
+  using _omap_list_ret =
+    _omap_get_values_ertr::future<OMapManager::omap_list_bare_ret>;
+  _omap_list_ret _omap_list(
+    const omap_root_le_t& omap_root,
+    Transaction& t,
+    const std::optional<std::string>& start,
+    OMapManager::omap_list_config_t config) const;
 
   friend class SeaStoreOmapIterator;
   omap_get_values_ret_t omap_list(
@@ -207,11 +266,13 @@ private:
     const std::optional<string> &_start,
     OMapManager::omap_list_config_t config);
 
-  TransactionManagerRef transaction_manager;
+  SegmentManagerRef segment_manager;
+  InterruptedTMRef transaction_manager;
   CollectionManagerRef collection_manager;
   OnodeManagerRef onode_manager;
 
-  using tm_ertr = TransactionManager::base_ertr;
+  using tm_iertr = TransactionManager::base_iertr;
+  using tm_ertr = with_trans_ertr<tm_iertr>;
   using tm_ret = tm_ertr::future<>;
   tm_ret _do_transaction_step(
     internal_context_t &ctx,
@@ -228,7 +289,8 @@ private:
   tm_ret _write(
     internal_context_t &ctx,
     OnodeRef &onode,
-    uint64_t offset, size_t len, const ceph::bufferlist& bl,
+    uint64_t offset, size_t len,
+    ceph::bufferlist &&bl,
     uint32_t fadvise_flags);
   tm_ret _omap_set_values(
     internal_context_t &ctx,
@@ -237,31 +299,60 @@ private:
   tm_ret _omap_set_header(
     internal_context_t &ctx,
     OnodeRef &onode,
-    const ceph::bufferlist &header);
+    ceph::bufferlist &&header);
   tm_ret _omap_rmkeys(
     internal_context_t &ctx,
     OnodeRef &onode,
-    const omap_keys_t& aset);
+    omap_keys_t &&aset);
   tm_ret _omap_rmkeyrange(
     internal_context_t &ctx,
     OnodeRef &onode,
-    const std::string &first,
-    const std::string &last);
+    std::string first,
+    std::string last);
   tm_ret _truncate(
     internal_context_t &ctx,
     OnodeRef &onode, uint64_t size);
   tm_ret _setattrs(
     internal_context_t &ctx,
     OnodeRef &onode,
-    std::map<std::string,bufferptr>& aset);
+    std::map<std::string,bufferlist>&& aset);
   tm_ret _create_collection(
     internal_context_t &ctx,
     const coll_t& cid, int bits);
   tm_ret _remove_collection(
     internal_context_t &ctx,
     const coll_t& cid);
+  using omap_set_kvs_ret = tm_ertr::future<>;
+  omap_set_kvs_ret _omap_set_kvs(
+    const omap_root_le_t& omap_root,
+    Transaction& t,
+    omap_root_le_t& mutable_omap_root,
+    std::map<std::string, ceph::bufferlist>&& kvs);
 
   boost::intrusive_ptr<SeastoreCollection> _get_collection(const coll_t& cid);
+
+  static constexpr auto LAT_MAX = static_cast<std::size_t>(op_type_t::MAX);
+  struct {
+    std::array<seastar::metrics::histogram, LAT_MAX> op_lat;
+  } stats;
+
+  seastar::metrics::histogram& get_latency(
+      op_type_t op_type) {
+    assert(static_cast<std::size_t>(op_type) < stats.op_lat.size());
+    return stats.op_lat[static_cast<std::size_t>(op_type)];
+  }
+
+  void add_latency_sample(op_type_t op_type,
+       std::chrono::steady_clock::duration dur) {
+    seastar::metrics::histogram& lat = get_latency(op_type);
+    lat.sample_count++;
+    lat.sample_sum += std::chrono::duration_cast<std::chrono::milliseconds>(dur).count();
+  }
+  seastar::metrics::metric_group metrics;
+  void register_metrics();
 };
 
+std::unique_ptr<SeaStore> make_seastore(
+  const std::string &device,
+  const ConfigValues &config);
 }

@@ -1,25 +1,19 @@
-cmake_minimum_required(VERSION 3.10.2)
-# remove cmake/modules/FindPython* once 3.12 is required
+cmake_minimum_required(VERSION 3.16)
 
 project(ceph
   VERSION 17.0.0
   LANGUAGES CXX C ASM)
 
-foreach(policy
-    CMP0028
-    CMP0046
-    CMP0048
-    CMP0051
-    CMP0054
-    CMP0056
-    CMP0065
-    CMP0074
-    CMP0075
-    CMP0093)
-  if(POLICY ${policy})
-    cmake_policy(SET ${policy} NEW)
-  endif()
-endforeach()
+cmake_policy(SET CMP0028 NEW)
+cmake_policy(SET CMP0046 NEW)
+cmake_policy(SET CMP0048 NEW)
+cmake_policy(SET CMP0051 NEW)
+cmake_policy(SET CMP0054 NEW)
+cmake_policy(SET CMP0056 NEW)
+cmake_policy(SET CMP0065 NEW)
+cmake_policy(SET CMP0074 NEW)
+cmake_policy(SET CMP0075 NEW)
+cmake_policy(SET CMP0093 NEW)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/modules/")
 
@@ -40,8 +34,8 @@ if(WIN32)
 endif()
 
 if(MINGW)
-  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-allow-multiple-definition")
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-allow-multiple-definition")
+  string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,-allow-multiple-definition")
+  string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,-allow-multiple-definition")
 
   # By default, cmake generates import libs for executables. The issue is that
   # for rados and rbd, the executable import lib overrides the library import lib.
@@ -52,6 +46,7 @@ if(MINGW)
   set(CMAKE_CXX_LINK_EXECUTABLE
     "<CMAKE_CXX_COMPILER> <FLAGS> <CMAKE_CXX_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> ${CMAKE_GNULD_IMAGE_VERSION} <LINK_LIBRARIES>")
 
+  link_directories(${MINGW_LINK_DIRECTORIES})
 endif()
 
 option(WITH_CCACHE "Build with ccache.")
@@ -85,10 +80,10 @@ if(WIN32)
   include_directories(
     ${PROJECT_SOURCE_DIR}/src/include/win32)
   # Boost complains if winsock2.h (or windows.h) is included before asio.hpp.
-  add_definitions(-include winsock_wrapper.h)
+  add_compile_options("SHELL:-include winsock_wrapper.h")
   # Boost is also defining some of the errno values, we'll have
   # to avoid mismatches.
-  add_definitions(-include win32_errno.h)
+  add_compile_options("SHELL:-include win32_errno.h")
 endif()
 
 if(FREEBSD)
@@ -105,6 +100,9 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 include(GNUInstallDirs)
 include(CephChecks)
+if(CMAKE_GENERATOR MATCHES Ninja)
+  include(LimitJobs)
+endif()
 
 set(CEPH_MAN_DIR "share/man" CACHE STRING "Install location for man pages (relative to prefix).")
 
@@ -122,15 +120,15 @@ if(WITH_STATIC_LIBSTDCXX)
     message(FATAL_ERROR "Please use GCC to enable WITH_STATIC_LIBSTDCXX")
   endif()
   set(static_linker_flags "-static-libstdc++ -static-libgcc")
-  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${static_linker_flags}")
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${static_linker_flags}")
+  string(APPEND CMAKE_SHARED_LINKER_FLAGS " ${static_linker_flags}")
+  string(APPEND CMAKE_EXE_LINKER_FLAGS " ${static_linker_flags}")
   unset(static_linker_flags)
   set(GPERFTOOLS_USE_STATIC_LIBS TRUE)
 endif()
 include(CheckCxxAtomic)
 if(NOT HAVE_CXX11_ATOMIC)
-  set(CMAKE_CXX_STANDARD_LIBRARIES
-    "${CMAKE_CXX_STANDARD_LIBRARIES} ${LIBATOMIC_LINK_FLAGS}")
+  string(APPEND CMAKE_CXX_STANDARD_LIBRARIES
+    " ${LIBATOMIC_LINK_FLAGS}")
 endif()
 
 option(WITH_RDMA "Enable RDMA in async messenger" ON)
@@ -335,7 +333,7 @@ jemalloc, and libc is supported. if not specified, will try to find tcmalloc, \
 and then jemalloc. If neither of then is found. use the one in libc.")
 if(ALLOCATOR)
   if(${ALLOCATOR} MATCHES "tcmalloc(_minimal)?")
-    find_package(gperftools REQUIRED)
+    find_package(gperftools 2.6.2 REQUIRED)
     set(HAVE_LIBTCMALLOC ON)
   elseif(${ALLOCATOR} STREQUAL "jemalloc")
     find_package(JeMalloc REQUIRED)
@@ -344,7 +342,7 @@ if(ALLOCATOR)
     message(FATAL_ERROR "Unsupported allocator selected: ${ALLOCATOR}")
   endif()
 else(ALLOCATOR)
-  find_package(gperftools)
+  find_package(gperftools 2.6.2)
   set(HAVE_LIBTCMALLOC ${gperftools_FOUND})
   if(NOT gperftools_FOUND)
     find_package(JeMalloc)
@@ -367,10 +365,6 @@ if(WIN32 OR (HAVE_LIBTCMALLOC AND WITH_STATIC_LIBSTDCXX))
   set(EXE_LINKER_USE_PIE FALSE)
 else()
   set(EXE_LINKER_USE_PIE ${ENABLE_SHARED})
-endif()
-
-if (HAVE_LIBTCMALLOC AND TCMALLOC_VERSION_STRING VERSION_LESS 2.6.2)
-  set(LIBTCMALLOC_MISSING_ALIGNED_ALLOC ON)
 endif()
 
 find_package(CURL REQUIRED)
@@ -405,8 +399,6 @@ endif()
 
 #option for RGW
 option(WITH_RADOSGW "Rados Gateway is enabled" ON)
-option(WITH_RADOSGW_FCGI_FRONTEND "Rados Gateway's FCGI frontend is enabled" OFF)
-option(WITH_RADOSGW_BEAST_FRONTEND "Rados Gateway's Beast frontend is enabled" ON)
 option(WITH_RADOSGW_BEAST_OPENSSL "Rados Gateway's Beast frontend uses OpenSSL" ON)
 option(WITH_RADOSGW_AMQP_ENDPOINT "Rados Gateway's pubsub support for AMQP push endpoint" ON)
 option(WITH_RADOSGW_KAFKA_ENDPOINT "Rados Gateway's pubsub support for Kafka push endpoint" ON)
@@ -414,9 +406,6 @@ option(WITH_RADOSGW_LUA_PACKAGES "Rados Gateway's support for dynamically adding
 
 if(WITH_RADOSGW)
   find_package(EXPAT REQUIRED)
-  if(WITH_RADOSGW_FCGI_FRONTEND)
-    find_package(fcgi REQUIRED)
-  endif()
   find_package(OATH REQUIRED)
 
 # https://curl.haxx.se/docs/install.html mentions the
@@ -577,8 +566,8 @@ if(sanitizers)
   find_package(Sanitizers REQUIRED ${sanitizers})
   add_compile_options(${Sanitizers_COMPILE_OPTIONS})
   string(REPLACE ";" " " sanitiers_compile_flags "${Sanitizers_COMPILE_OPTIONS}")
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${sanitiers_compile_flags}")
-  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${sanitiers_compile_flags}")
+  string(APPEND CMAKE_EXE_LINKER_FLAGS " ${sanitiers_compile_flags}")
+  string(APPEND CMAKE_SHARED_LINKER_FLAGS " ${sanitiers_compile_flags}")
 endif()
 
 # Rocksdb
@@ -649,9 +638,8 @@ endif()
 set(DASHBOARD_FRONTEND_LANGS "" CACHE STRING
   "List of comma separated ceph-dashboard frontend languages to build. \
   Use value `ALL` to build all languages")
-
-# TODO: make this an option and set it to the same value as WITH_MGR_DASHBOARD_FRONTEND
-set(WITH_MGR_ROOK_CLIENT WITH_MGR_DASHBOARD_FRONTEND)
+CMAKE_DEPENDENT_OPTION(WITH_MGR_ROOK_CLIENT "Enable the mgr's Rook support" ON
+  "WITH_MGR" OFF)
 
 include_directories(SYSTEM ${PROJECT_BINARY_DIR}/include)
 
@@ -712,5 +700,3 @@ add_tags(ctags
   EXCLUDE_OPTS ${CTAG_EXCLUDES}
   EXCLUDES "*.js" "*.css" ".tox" "python-common/build")
 add_custom_target(tags DEPENDS ctags)
-
-set(VERSION 15.2.0)

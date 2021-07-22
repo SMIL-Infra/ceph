@@ -6,6 +6,7 @@ import math
 import os
 import sys
 
+# flake8: noqa: E127
 
 def type_to_cxx(t):
     return f'Option::TYPE_{t.upper()}'
@@ -127,7 +128,7 @@ def set_enum_allowed(values):
     if values is None:
         return ''
     param = ', '.join(f'"{v}"' for v in values)
-    return f'.set_enum_allowed({{{param}}})'
+    return f'.set_enum_allowed({{{param}}})\n'
 
 
 def add_flags(flags):
@@ -185,6 +186,22 @@ def yaml_to_cxx(opt, indent):
     return cxx
 
 
+def type_to_h(t):
+    if t == 'uint':
+        return 'OPT_U32'
+    return f'OPT_{t.upper()}'
+
+
+def yaml_to_h(opt):
+    if opt.get('with_legacy', False):
+        name = opt['name']
+        typ = opt['type']
+        htyp = type_to_h(typ)
+        return f'OPTION({name}, {htyp})'
+    else:
+        return ''
+
+
 TEMPLATE_CC = '''#include "common/options.h"
 {headers}
 
@@ -194,6 +211,26 @@ std::vector<Option> get_{name}_options() {{
   }});
 }}
 '''
+
+
+# PyYAML doesn't check for duplicates even though the YAML spec says
+# that mapping keys must be unique and that duplicates must be treated
+# as an error.  See https://github.com/yaml/pyyaml/issues/165.
+#
+# This workaround breaks merge keys -- in "<<: *xyz", duplicate keys
+# from xyz mapping raise an error instead of being discarded.
+class UniqueKeySafeLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        mapping = super().construct_mapping(node, deep)
+        keys = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in keys:
+                raise yaml.constructor.ConstructorError(None, None,
+                                                        "found duplicate key",
+                                                        key_node.start_mark)
+            keys.add(key)
+        return mapping
 
 
 def translate(opts):
@@ -208,21 +245,24 @@ def translate(opts):
         name = os.path.split(opts.input)[-1]
         name = name.rsplit('.', 1)[0]
     name = name.replace('-', '_')
-    with open(opts.input) as infile, open(opts.output, 'w') as outfile:
-        yml = yaml.safe_load(infile)
+    # noqa: E127
+    with open(opts.input) as infile, \
+         open(opts.output, 'w') as cc_file, \
+         open(opts.legacy, 'w') as h_file:
+        yml = yaml.load(infile, Loader=UniqueKeySafeLoader)
         headers = yml.get('headers', '')
-        outfile.write(prelude.format(name=name, headers=headers))
+        cc_file.write(prelude.format(name=name, headers=headers))
         options = yml['options']
         for option in options:
             try:
-                cxx = yaml_to_cxx(option, opts.indent)
-                outfile.write(cxx)
-                outfile.write('\n')
+                cc_file.write(yaml_to_cxx(option, opts.indent) + '\n')
+                if option.get('with_legacy', False):
+                    h_file.write(yaml_to_h(option) + '\n')
             except ValueError as e:
                 print(f'failed to translate option "{name}": {e}',
                       file=sys.stderr)
                 return 1
-        outfile.write(epilogue.replace("}}", "}"))
+        cc_file.write(epilogue.replace("}}", "}"))
 
 
 def readable_size(value, typ):
@@ -273,7 +313,7 @@ def readable_millisecs(value, typ):
 
 def readable(opts):
     with open(opts.input) as infile, open(opts.output, 'w') as outfile:
-        yml = yaml.safe_load(infile)
+        yml = yaml.load(infile, Loader=UniqueKeySafeLoader)
         options = yml['options']
         for option in options:
             typ = option['type']
@@ -302,6 +342,9 @@ def main():
     parser.add_argument('-o', '--output', dest='output',
                         default='options',
                         help='the path to the generated .cc file')
+    parser.add_argument('--legacy', dest='legacy',
+                        default='legacy_options',
+                        help='the path to the generated legacy .h file')
     parser.add_argument('--indent', type=int,
                         default=4,
                         help='the number of spaces added before each line')

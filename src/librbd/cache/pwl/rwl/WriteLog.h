@@ -82,7 +82,7 @@ protected:
   using AbstractWriteLog<ImageCtxT>::m_first_valid_entry;
 
   void process_work() override;
-  void schedule_append_ops(pwl::GenericLogOperations &ops) override;
+  void schedule_append_ops(pwl::GenericLogOperations &ops, C_BlockIORequestT *req) override;
   void append_scheduled_ops(void) override;
   void reserve_cache(C_BlockIORequestT *req,
                      bool &alloc_succeeds, bool &no_space) override;
@@ -103,7 +103,7 @@ protected:
       C_BlockIORequestT *req) override;
   Context *construct_flush_entry_ctx(
         const std::shared_ptr<pwl::GenericLogEntry> log_entry) override;
-  void initialize_pool(Context *on_finish, pwl::DeferredContexts &later) override;
+  bool initialize_pool(Context *on_finish, pwl::DeferredContexts &later) override;
   void write_data_to_buffer(
       std::shared_ptr<pwl::WriteLogEntry> ws_entry,
       pwl::WriteLogCacheEntry *pmem_entry) override;

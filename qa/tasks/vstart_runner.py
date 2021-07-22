@@ -64,7 +64,7 @@ try:
 except:
     pass
 
-def init_log():
+def init_log(log_level=logging.INFO):
     global log
     if log is not None:
         del log
@@ -79,7 +79,7 @@ def init_log():
         datefmt='%Y-%m-%dT%H:%M:%S')
     handler.setFormatter(formatter)
     log.addHandler(handler)
-    log.setLevel(logging.INFO)
+    log.setLevel(log_level)
 
 log = None
 init_log()
@@ -182,6 +182,22 @@ class LocalRemoteProcess(object):
         self.check_status = check_status
         self.exitstatus = self.returncode = None
 
+    def _write_stdout(self, out):
+        if isinstance(self.stdout, StringIO):
+            self.stdout.write(out.decode(errors='ignore'))
+        elif self.stdout is None:
+            pass
+        else:
+            self.stdout.write(out)
+
+    def _write_stderr(self, err):
+        if isinstance(self.stderr, StringIO):
+            self.stderr.write(err.decode(errors='ignore'))
+        elif self.stderr is None:
+            pass
+        else:
+            self.stderr.write(err)
+
     def wait(self):
         if self.finished:
             # Avoid calling communicate() on a dead process because it'll
@@ -193,18 +209,8 @@ class LocalRemoteProcess(object):
 
         out, err = self.subproc.communicate()
         out, err = rm_nonascii_chars(out), rm_nonascii_chars(err)
-        if isinstance(self.stdout, StringIO):
-            self.stdout.write(out.decode(errors='ignore'))
-        elif self.stdout is None:
-            pass
-        else:
-            self.stdout.write(out)
-        if isinstance(self.stderr, StringIO):
-            self.stderr.write(err.decode(errors='ignore'))
-        elif self.stderr is None:
-            pass
-        else:
-            self.stderr.write(err)
+        self._write_stdout(out)
+        self._write_stderr(err)
 
         self.exitstatus = self.returncode = self.subproc.returncode
 
@@ -222,19 +228,11 @@ class LocalRemoteProcess(object):
 
         if self.subproc.poll() is not None:
             out, err = self.subproc.communicate()
-            if isinstance(self.stdout, StringIO):
-                self.stdout.write(out.decode(errors='ignore'))
-            elif self.stdout is None:
-                pass
-            else:
-                self.stdout.write(out)
-            if isinstance(self.stderr, StringIO):
-                self.stderr.write(err.decode(errors='ignore'))
-            elif self.stderr is None:
-                pass
-            else:
-                self.stderr.write(err)
+            self._write_stdout(out)
+            self._write_stderr(err)
+
             self.exitstatus = self.returncode = self.subproc.returncode
+
             return True
         else:
             return False
@@ -1013,6 +1011,12 @@ class LocalCluster(object):
     def only(self, requested):
         return self.__class__(rolename=requested)
 
+    def run(self, *args, **kwargs):
+        r = []
+        for remote in self.remotes.keys():
+            r.append(remote.run(*args, **kwargs))
+        return r
+
 
 class LocalContext(object):
     def __init__(self):
@@ -1109,23 +1113,20 @@ class LogRotate():
 def teardown_cluster():
     log.info('\ntearing down the cluster...')
     remote.run(args=[os.path.join(SRC_PREFIX, "stop.sh")], timeout=60)
+    log.info('\nceph cluster torn down')
     remote.run(args=['rm', '-rf', './dev', './out'])
 
 
 def clear_old_log():
-    from os import stat
-
     try:
-        stat(logpath)
-    # would need an update when making this py3 compatible. Use FileNotFound
-    # instead.
-    except OSError:
+        os.stat(logpath)
+    except FileNotFoundError:
         return
     else:
         os.remove(logpath)
         with open(logpath, 'w') as logfile:
             logfile.write('')
-        init_log()
+        init_log(log.level)
         log.debug('logging in a fresh file now...')
 
 
@@ -1395,9 +1396,11 @@ def exec_test():
         if opt_verbose:
             args.append("-d")
 
+        log.info('\nrunning vstart.sh now...')
         # usually, i get vstart.sh running completely in less than 100
         # seconds.
         remote.run(args=args, env=vstart_env, timeout=(3 * 60))
+        log.info('\nvstart.sh finished running')
 
         # Wait for OSD to come up so that subsequent injectargs etc will
         # definitely succeed

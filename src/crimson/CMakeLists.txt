@@ -15,6 +15,7 @@ set(crimson_common_srcs
   common/assert.cc
   common/buffer_io.cc
   common/config_proxy.cc
+  common/fatal_signal.cc
   common/formatter.cc
   common/perf_counters_collection.cc
   common/log.cc
@@ -185,6 +186,8 @@ add_library(crimson STATIC
   ${crimson_net_srcs})
 target_compile_options(crimson PUBLIC
   "-ftemplate-backtrace-limit=0")
+set_target_properties(crimson PROPERTIES
+  JOB_POOL_COMPILE heavy_compile_job_pool)
 target_link_libraries(crimson
   PUBLIC
     crimson-common

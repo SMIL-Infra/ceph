@@ -1,14 +1,11 @@
 import fileinput
+import glob
 import logging
 import os
 import shutil
 import sys
 import yaml
 import sphinx.util
-
-from sphinx.domains.python import PyField
-from sphinx.locale import _
-from sphinx.util.docfields import Field
 
 
 top_level = \
@@ -123,6 +120,7 @@ extensions = [
     'breathe',
     'ceph_commands',
     'ceph_releases',
+    'ceph_confval',
     'sphinxcontrib.openapi'
     ]
 
@@ -229,6 +227,12 @@ for c in pybinds:
 openapi_logger = sphinx.util.logging.getLogger('sphinxcontrib.openapi.openapi30')
 openapi_logger.setLevel(logging.WARNING)
 
+# ceph_confval
+ceph_confval_imports = glob.glob(os.path.join(top_level,
+                                              'src/common/options',
+                                              '*.yaml.in'))
+ceph_confval_mgr_module_path = 'src/pybind/mgr'
+ceph_confval_mgr_python_path = 'src/pybind'
 
 # handles edit-on-github and old version warning display
 def setup(app):
@@ -240,36 +244,3 @@ def setup(app):
                 generate_state_diagram(['src/osd/PeeringState.h',
                                         'src/osd/PeeringState.cc'],
                                        'doc/dev/peering_graph.generated.dot'))
-
-    app.add_object_type(
-        'confval',
-        'confval',
-        objname='configuration value',
-        indextemplate='pair: %s; configuration value',
-        doc_field_types=[
-            PyField(
-                'type',
-                label=_('Type'),
-                has_arg=False,
-                names=('type',),
-                bodyrolename='class'
-            ),
-            Field(
-                'default',
-                label=_('Default'),
-                has_arg=False,
-                names=('default',),
-            ),
-            Field(
-                'required',
-                label=_('Required'),
-                has_arg=False,
-                names=('required',),
-            ),
-            Field(
-                'example',
-                label=_('Example'),
-                has_arg=False,
-            )
-        ]
-    )

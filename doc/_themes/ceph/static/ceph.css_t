@@ -16,6 +16,7 @@
 
 .top-bar > div[role=navigation] > ul {
   border-top: 5px solid #9C4850;
+  padding: 0 1em;
 }
 
 .top-bar > div[role=navigation] > hr {
@@ -39,6 +40,10 @@ body {
 .wy-breadcrumbs {
   background-color: #80D2DC;
   font-size: 0.9em;
+}
+
+.wy-nav-content-wrap.shift {
+  top: 2em;
 }
 
 section h1,
